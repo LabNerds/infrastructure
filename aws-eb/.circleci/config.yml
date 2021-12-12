@@ -1,0 +1,129 @@
+version: 2
+jobs:
+
+  build-and-test:
+  #This job is a quick sanity check that the project builds before
+    docker:
+      - image: circleci/node:12
+    steps:
+      - checkout
+      - run:
+          name: Build and Test
+          command: |
+            yarn
+            yarn prestart:prod
+            cp .env.example .env
+            yarn test
+  deploy-stg:
+    docker:
+      - image: circleci/node:12
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Install dependencies
+          command: |
+            sudo apt-get -y -qq update
+            sudo apt-get install python3-pip awscli build-essential
+            pip3 install awscli --upgrade --user
+      - run:
+          name: Set Image Tag
+          command: |
+            COMMIT_HASH=`echo $CIRCLE_SHA1 | cut -c -8`
+            IMAGE_TAG="${CIRCLE_BRANCH}-${COMMIT_HASH}"
+            echo "export IMAGE_TAG=\"${CIRCLE_BRANCH}-${COMMIT_HASH}\"" >> $BASH_ENV
+      # you will need to set the proper ECR region depending on where your ECR is
+      - run:
+          name: Login to ECR
+          command: |
+            aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin 267177663465.dkr.ecr.ap-southeast-1.amazonaws.com
+      - run:
+          name: Build Nest BE and Push to ECR Staging
+          command: |
+            docker build -t staging/elxr-nest-staging .
+            docker tag staging/elxr-nest-staging 267177663465.dkr.ecr.ap-southeast-1.amazonaws.com/elxr-nest-staging:latest
+            docker push 267177663465.dkr.ecr.ap-southeast-1.amazonaws.com/elxr-nest-staging:latest
+      - run:
+          name: Prepare to deploy to Elastic Beanstalk
+          command: |
+            mkdir ~/.aws
+            touch ~/.aws/config
+            chmod 600 ~/.aws/config
+            echo "[profile elxr]" > ~/.aws/config
+            echo "aws_access_key_id=$AWS_ACCESS_KEY_ID" >> ~/.aws/config
+            echo "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" >> ~/.aws/config
+      # This next step could be cleaned up, or build custom image. eb-cli takes too long to install.
+      - run:
+          name: Deploy
+          command: |
+            git clone https://github.com/aws/aws-elastic-beanstalk-cli-setup.git
+            ./aws-elastic-beanstalk-cli-setup/scripts/bundled_installer
+            echo 'export PATH="/home/circleci/.ebcli-virtual-env/executables:$PATH"' >> ~/.bash_profile && source ~/.bash_profile
+            eb deploy
+
+  deploy-prod:
+    docker:
+      - image: circleci/node:12
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Install dependencies
+          command: |
+            sudo apt-get -y -qq update
+            sudo apt-get install python3-pip awscli build-essential
+            pip3 install awscli --upgrade --user
+      - run:
+          name: Set Image Tag
+          command: |
+            COMMIT_HASH=`echo $CIRCLE_SHA1 | cut -c -8`
+            IMAGE_TAG="${CIRCLE_BRANCH}-${COMMIT_HASH}"
+            echo "export IMAGE_TAG=\"${CIRCLE_BRANCH}-${COMMIT_HASH}\"" >> $BASH_ENV
+      # you will need to set the proper ECR region depending on where your ECR is
+      - run:
+          name: Login to ECR
+          command: |
+            aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin 267177663465.dkr.ecr.ap-southeast-1.amazonaws.com
+      - run:
+          name: Build Nest BE and Push to ECR Production
+          command: |
+            docker build -t production/elxr-nest-production .
+            docker tag production/elxr-nest-production 267177663465.dkr.ecr.ap-southeast-1.amazonaws.com/elxr-nest-production:latest
+            docker push 267177663465.dkr.ecr.ap-southeast-1.amazonaws.com/elxr-nest-production:latest
+      - run:
+          name: Prepare to deploy to Elastic Beanstalk
+          command: |
+            mkdir ~/.aws
+            touch ~/.aws/config
+            chmod 600 ~/.aws/config
+            echo "[profile elxr]" > ~/.aws/config
+            echo "aws_access_key_id=$AWS_ACCESS_KEY_ID" >> ~/.aws/config
+            echo "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" >> ~/.aws/config
+      # This next step could be cleaned up, or build custom image. eb-cli takes too long to install.
+      - run:
+          name: Deploy
+          command: |
+            git clone https://github.com/aws/aws-elastic-beanstalk-cli-setup.git
+            ./aws-elastic-beanstalk-cli-setup/scripts/bundled_installer
+            echo 'export PATH="/home/circleci/.ebcli-virtual-env/executables:$PATH"' >> ~/.bash_profile && source ~/.bash_profile
+            eb deploy
+workflows:
+  version: 2
+
+  build_and_test:
+    jobs:
+      - build-and-test
+      - deploy-stg:
+          context: aws-creds
+          requires:
+            - build-and-test
+          filters:
+            branches:
+              only: staging
+      - deploy-prod:
+          context: aws-creds
+          requires:
+            - build-and-test
+          filters:
+            branches:
+              only: master
